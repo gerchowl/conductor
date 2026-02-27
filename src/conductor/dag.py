@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
-from conductor.gh_sync import detect_phase, parse_blockers
+from conductor.gh_sync import parse_blockers
 
 
 @dataclass
@@ -155,17 +155,15 @@ class DAG:
 def build_dag_from_issues(issues: list[dict]) -> DAG:
     """Build DAG from issue data dicts.
 
-    Each dict should have: number, title, body (for blocker parsing),
-    labels (for phase detection).
+    Each dict should have: number, title, body (for blocker parsing).
+    Phase is NOT set here — it comes from the local DB.
     """
     dag = DAG()
     for issue in issues:
         blockers = parse_blockers(issue.get("body", ""))
-        phase = detect_phase(issue.get("labels", []))
         dag.add_node(
             number=issue["number"],
             title=issue["title"],
             blocked_by=blockers,
-            phase=phase,
         )
     return dag

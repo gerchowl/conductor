@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS issues (
     number INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
     phase TEXT NOT NULL DEFAULT 'pending',
+    milestone TEXT,
     current_step TEXT,
     dispatched_at TEXT,
     completed_at TEXT,
@@ -46,6 +47,7 @@ _ISSUE_COLUMNS = (
     "number",
     "title",
     "phase",
+    "milestone",
     "current_step",
     "dispatched_at",
     "completed_at",
@@ -54,6 +56,10 @@ _ISSUE_COLUMNS = (
     "pr_number",
     "stuck_reason",
 )
+
+_MIGRATIONS = [
+    "ALTER TABLE issues ADD COLUMN milestone TEXT",
+]
 
 
 class StateDB:
@@ -64,6 +70,15 @@ class StateDB:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        self._run_migrations()
+
+    def _run_migrations(self) -> None:
+        for sql in _MIGRATIONS:
+            try:
+                self._conn.execute(sql)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
 
     def close(self) -> None:
         self._conn.close()

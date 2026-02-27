@@ -257,15 +257,15 @@ class TestBuildDagFromIssues:
 
         node1 = dag.get_node(1)
         assert node1 is not None
-        assert node1.phase == "plan"
+        assert node1.phase == "pending"
         assert node1.blocked_by == []
 
         node2 = dag.get_node(2)
         assert node2 is not None
-        assert node2.phase == "design"
+        assert node2.phase == "pending"
         assert node2.blocked_by == [1]
 
-    def test_no_labels_defaults_pending(self) -> None:
+    def test_phase_always_defaults_pending(self) -> None:
         issues = [{"number": 1, "title": "X", "body": "", "labels": []}]
         dag = build_dag_from_issues(issues)
         node = dag.get_node(1)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import signal
 import subprocess
 import time
@@ -20,13 +21,15 @@ from conductor.state_db import StateDB
 
 logger = logging.getLogger(__name__)
 
+_SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
+
 
 def _list_open_issues(repo: str | None) -> list[dict]:
     """Fetch all open issues from GitHub via gh CLI."""
     cmd = ["gh", "issue", "list", "--state", "open", "--limit", "200"]
     if repo:
         cmd.extend(["--repo", repo])
-    cmd.extend(["--json", "number,title,body,labels,state"])
+    cmd.extend(["--json", "number,title,body,labels,state,milestone"])
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -39,15 +42,59 @@ def _list_open_issues(repo: str | None) -> list[dict]:
             lbl["name"] if isinstance(lbl, dict) else lbl
             for lbl in item.get("labels", [])
         ]
+        ms = item.get("milestone")
+        milestone = ms.get("title") if isinstance(ms, dict) else None
         issues.append(
             {
                 "number": item["number"],
                 "title": item["title"],
                 "body": item.get("body", ""),
                 "labels": labels,
+                "milestone": milestone,
             }
         )
     return issues
+
+
+def _is_epic(title: str) -> bool:
+    return title.strip().upper().startswith("[EPIC]")
+
+
+def _semver_key(title: str) -> tuple[int, ...]:
+    """Extract semver tuple from milestone title for sorting."""
+    m = _SEMVER_RE.match(title)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    return (999, 999, 999)
+
+
+def _resolve_target_milestone(repo: str | None) -> str | None:
+    """Fetch open milestones, return the one with the lowest semver."""
+    cmd = [
+        "gh",
+        "api",
+        "repos/{owner}/{repo}/milestones",
+        "--jq",
+        '.[] | select(.state=="open") | .title',
+    ]
+    if repo:
+        cmd = [
+            "gh",
+            "api",
+            f"repos/{repo}/milestones",
+            "--jq",
+            '.[] | select(.state=="open") | .title',
+        ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        logger.warning("Failed to fetch milestones from GitHub")
+        return None
+    titles = [t.strip() for t in result.stdout.strip().splitlines() if t.strip()]
+    if not titles:
+        return None
+    titles.sort(key=_semver_key)
+    return titles[0]
 
 
 class ConductorRunner:
@@ -62,12 +109,20 @@ class ConductorRunner:
             default_model=self.config.pool.default_model,
         )
         self._shutdown = False
+        self._dispatches: dict[int, str] = {}
+        self._target_milestone: str | None = None
 
     def run(self, poll_interval: float = 10.0) -> None:
         signal.signal(signal.SIGINT, self._handle_shutdown)
         console = Console()
 
-        console.print("[bold]Conductor starting...[/bold]")
+        self._target_milestone = _resolve_target_milestone(self.repo)
+        if self._target_milestone:
+            console.print(
+                f"[bold]Conductor starting (milestone: {self._target_milestone})[/bold]"
+            )
+        else:
+            console.print("[bold]Conductor starting (no milestone filter)[/bold]")
 
         dag = self._refresh_dag()
         self._sync_dag_to_db(dag)
@@ -88,6 +143,7 @@ class ConductorRunner:
                         break
                     time.sleep(1)
 
+                self._target_milestone = _resolve_target_milestone(self.repo)
                 dag = self._refresh_dag()
                 self._sync_dag_to_db(dag)
 
@@ -101,22 +157,46 @@ class ConductorRunner:
         for node in ready:
             if node.phase in ("merged", "pr", "closed"):
                 continue
+            if node.number in self._dispatches:
+                continue
             current_phase = node.phase if node.phase in PHASE_ORDER else "design"
             self._dispatch_issue(node, current_phase)
 
     def _refresh_dag(self) -> DAG:
         issues = _list_open_issues(self.repo)
-        return build_dag_from_issues(issues)
+        filtered = [
+            i
+            for i in issues
+            if not _is_epic(i["title"])
+            and (
+                self._target_milestone is None
+                or i.get("milestone") == self._target_milestone
+            )
+        ]
+        return build_dag_from_issues(filtered)
 
     def _sync_dag_to_db(self, dag: DAG) -> None:
-        """Upsert DAG nodes into the state DB."""
+        """Sync DAG nodes to DB, preserving local phase."""
         for node in dag.nodes:
-            self.db.upsert_issue(
-                number=node.number,
-                title=node.title,
-                phase=node.phase,
-                blocked_by=json.dumps(node.blocked_by),
-            )
+            existing = self.db.get_issue(node.number)
+            if existing is None:
+                self.db.upsert_issue(
+                    number=node.number,
+                    title=node.title,
+                    phase="pending",
+                    milestone=self._target_milestone,
+                    blocked_by=json.dumps(node.blocked_by),
+                )
+            else:
+                self.db.update_issue(
+                    node.number,
+                    title=node.title,
+                    milestone=self._target_milestone,
+                    blocked_by=json.dumps(node.blocked_by),
+                )
+            db_issue = self.db.get_issue(node.number)
+            if db_issue:
+                node.phase = db_issue["phase"]
 
     def _completed_issues(self) -> set[int]:
         return {
@@ -138,22 +218,28 @@ class ConductorRunner:
             worktree=worktree,
             repo=self.repo,
         )
-        result = run_phase(ctx, phase)
-        if result.success:
-            logger.info("Issue #%d phase %s succeeded", node.number, phase)
-        else:
-            logger.warning(
-                "Issue #%d phase %s failed: %s",
-                node.number,
-                phase,
-                result.error,
-            )
+        self._dispatches[node.number] = f"agent-{node.number}"
+        try:
+            result = run_phase(ctx, phase)
+            if result.success:
+                logger.info("Issue #%d phase %s succeeded", node.number, phase)
+            else:
+                logger.warning(
+                    "Issue #%d phase %s failed: %s",
+                    node.number,
+                    phase,
+                    result.error,
+                )
+        finally:
+            self._dispatches.pop(node.number, None)
 
     def _render_dashboard(self, dag: DAG | None = None) -> Table:
-        table = Table(title="Conductor Dashboard")
+        ms_label = self._target_milestone or "all"
+        table = Table(title=f"Conductor Dashboard (milestone: {ms_label})")
         table.add_column("#", style="cyan", justify="right")
         table.add_column("Title", max_width=50)
         table.add_column("Phase", style="green")
+        table.add_column("Agent", style="magenta")
         table.add_column("Blocked By", style="dim")
 
         nodes = dag.nodes if dag else []
@@ -165,12 +251,19 @@ class ConductorRunner:
             )
             is_ready = not dag.is_blocked(node.number, completed)
             phase_style = "bold green" if is_ready else "dim"
+            agent = self._dispatches.get(node.number, "-")
             table.add_row(
                 str(node.number),
                 node.title,
                 f"[{phase_style}]{node.phase}[/]",
+                agent,
                 blocked_str,
             )
+
+        busy = sum(1 for s in self.pool._sessions.values() if s.busy)
+        idle = sum(1 for s in self.pool._sessions.values() if not s.busy)
+        total = self.pool._max_sessions
+        table.caption = f"Pool: {busy}/{total} busy | Idle: {idle}"
         return table
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
