@@ -7,6 +7,7 @@ import re
 import signal
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from rich.console import Console
@@ -108,7 +109,7 @@ class ConductorRunner:
             default_model=self.config.pool.default_model,
         )
         self._shutdown_event = threading.Event()
-        self._dispatches: dict[int, str] = {}
+        self._dispatches: dict[int, tuple[str, float, str | None]] = {}
         self._dispatch_lock = threading.Lock()
         self._target_milestone: str | None = None
         self._executor = concurrent.futures.ThreadPoolExecutor(
@@ -188,9 +189,19 @@ class ConductorRunner:
         with self._dispatch_lock:
             if node.number in self._dispatches:
                 return
-            self._dispatches[node.number] = f"agent-{node.number}"
+            self._dispatches[node.number] = (
+                f"agent-{node.number}",
+                time.monotonic(),
+                None,
+            )
         future = self._executor.submit(self._dispatch_issue, node, phase)
         self._futures[node.number] = future
+
+    def _on_session_acquired(self, issue_number: int, session_name: str) -> None:
+        with self._dispatch_lock:
+            if issue_number in self._dispatches:
+                disp = self._dispatches[issue_number]
+                self._dispatches[issue_number] = (disp[0], disp[1], session_name)
 
     def _reap_futures(self, dag: DAG) -> None:
         done = [n for n, f in self._futures.items() if f.done()]
@@ -273,6 +284,7 @@ class ConductorRunner:
             worktree=worktree,
             repo=self.repo,
             shutdown_event=self._shutdown_event,
+            on_session_acquired=self._on_session_acquired,
         )
         try:
             result = run_phase(ctx, phase)
@@ -289,6 +301,16 @@ class ConductorRunner:
             with self._dispatch_lock:
                 self._dispatches.pop(node.number, None)
 
+    @staticmethod
+    def _format_elapsed(seconds: float) -> str:
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h}h{m:02d}m"
+        if m:
+            return f"{m}m{s:02d}s"
+        return f"{s}s"
+
     def _render_dashboard(self, dag: DAG | None = None) -> Table:
         ms_label = self._target_milestone or "all"
         table = Table(title=f"Conductor Dashboard (milestone: {ms_label})")
@@ -296,10 +318,13 @@ class ConductorRunner:
         table.add_column("Title", max_width=50)
         table.add_column("Phase", style="green")
         table.add_column("Agent", style="magenta")
+        table.add_column("Elapsed", justify="right")
+        table.add_column("Activity", justify="center")
         table.add_column("Blocked By", style="dim")
 
         nodes = dag.nodes if dag else []
         completed = self._completed_issues()
+        now = time.monotonic()
 
         for node in nodes:
             blocked_str = (
@@ -310,12 +335,36 @@ class ConductorRunner:
             is_ready = not dag.is_blocked(node.number, completed)
             phase_style = "bold green" if is_ready else "dim"
             with self._dispatch_lock:
-                agent = self._dispatches.get(node.number, "-")
+                dispatch_info = self._dispatches.get(node.number)
+
+            if dispatch_info is not None:
+                agent, started_at, session_name = dispatch_info
+                elapsed = self._format_elapsed(now - started_at)
+                age = (
+                    self.pool.pane_activity_age(session_name)
+                    if session_name
+                    else None
+                )
+                if age is None:
+                    activity = "[dim]-[/]"
+                elif age < 5:
+                    activity = "[bold green]●[/]"
+                elif age < 30:
+                    activity = "[yellow]◐[/]"
+                else:
+                    activity = "[red]○[/]"
+            else:
+                agent = "-"
+                elapsed = "-"
+                activity = "-"
+
             table.add_row(
                 str(node.number),
                 node.title,
                 f"[{phase_style}]{node.phase}[/]",
                 agent,
+                elapsed,
+                activity,
                 blocked_str,
             )
 

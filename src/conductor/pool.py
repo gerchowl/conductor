@@ -64,7 +64,7 @@ class AgentPool:
                 name,
                 "-c",
                 str(worktree),
-                "agent chat --yolo --trust --approve-mcps",
+                "agent chat --yolo --approve-mcps",
             ],
             check=True,
         )
@@ -144,6 +144,27 @@ class AgentPool:
     @property
     def active_count(self) -> int:
         return len(self._sessions)
+
+    def pane_activity_age(self, session_name: str) -> float | None:
+        """Seconds since last tmux pane activity. None if unavailable."""
+        try:
+            result = self._run(
+                [
+                    "tmux", "display-message", "-t", session_name,
+                    "-p", "#{pane_activity}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            epoch = int(result.stdout.strip())
+        except ValueError:
+            return None
+        return time.time() - epoch
 
     @property
     def idle_sessions(self) -> list[AgentSession]:

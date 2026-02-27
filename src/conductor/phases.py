@@ -34,6 +34,7 @@ class PhaseContext:
     worktree: Path
     repo: str | None = None
     shutdown_event: threading.Event = field(default_factory=threading.Event)
+    on_session_acquired: Callable[[int, str], None] | None = None
 
 
 class PhaseResult:
@@ -125,6 +126,7 @@ def _dispatch_swarm(
             worktree=ctx.worktree,
             timeout=_resolve_timeout(ctx, step_id),
             shutdown_event=ctx.shutdown_event,
+            on_session_acquired=ctx.on_session_acquired,
         )
 
     with concurrent.futures.ThreadPoolExecutor(
@@ -193,6 +195,7 @@ def _phase_dispatch(
         worktree=ctx.worktree,
         timeout=_resolve_timeout(ctx, step_id),
         shutdown_event=ctx.shutdown_event,
+        on_session_acquired=ctx.on_session_acquired,
     )
 
 

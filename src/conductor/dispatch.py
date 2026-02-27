@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
@@ -88,6 +89,7 @@ def dispatch_step[T: BaseModel](
     poll_interval: float = 2.0,
     timeout: float | None = None,
     shutdown_event: threading.Event | None = None,
+    on_session_acquired: Callable[[int, str], None] | None = None,
 ) -> StepResult:
     """Dispatch a single step to an agent and return validated output."""
     tier = _resolve_step_tier(config.steps, step_id)
@@ -111,6 +113,8 @@ def dispatch_step[T: BaseModel](
     session: AgentSession | None = None
     try:
         session = pool.acquire(worktree, model=model_id)
+        if on_session_acquired is not None:
+            on_session_acquired(issue_number, session.name)
         pool.clear_context(session)
 
         prompt = _build_prompt(input_path, output_path)

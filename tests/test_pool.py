@@ -71,7 +71,7 @@ class TestAcquire:
                 "conductor-agent-0",
                 "-c",
                 str(worktree),
-                "agent chat --yolo --trust --approve-mcps",
+                "agent chat --yolo --approve-mcps",
             ],
             check=True,
         )
@@ -209,3 +209,46 @@ class TestProperties:
         assert len(idle) == 2
         assert s1 in idle
         assert s2 in idle
+
+
+class TestPaneActivityAge:
+    def test_returns_seconds_since_activity(
+        self, pool: AgentPool, worktree: Path
+    ) -> None:
+        import time
+        from unittest.mock import patch as _patch
+
+        now = int(time.time()) - 10
+        with _patch.object(
+            pool,
+            "_run",
+            return_value=MagicMock(returncode=0, stdout=f"{now}\n"),
+        ):
+            age = pool.pane_activity_age("test-session")
+        assert age is not None
+        assert 9 <= age <= 12
+
+    def test_returns_none_on_failure(
+        self, pool: AgentPool, worktree: Path
+    ) -> None:
+        from unittest.mock import patch as _patch
+
+        with _patch.object(
+            pool,
+            "_run",
+            return_value=MagicMock(returncode=1, stdout=""),
+        ):
+            assert pool.pane_activity_age("test-session") is None
+
+    def test_returns_none_on_timeout(
+        self, pool: AgentPool, worktree: Path
+    ) -> None:
+        import subprocess
+        from unittest.mock import patch as _patch
+
+        with _patch.object(
+            pool,
+            "_run",
+            side_effect=subprocess.TimeoutExpired(cmd="tmux", timeout=30),
+        ):
+            assert pool.pane_activity_age("test-session") is None

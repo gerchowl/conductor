@@ -84,7 +84,9 @@ class TestConductorRunner:
                 )
             )
             mock_db_cls.return_value = MagicMock()
-            mock_pool_cls.return_value = MagicMock()
+            mock_pool = MagicMock()
+            mock_pool.pane_activity_age.return_value = None
+            mock_pool_cls.return_value = mock_pool
             runner = ConductorRunner(tmp_path, repo="owner/repo")
         return runner
 
@@ -129,7 +131,7 @@ class TestConductorRunner:
 
         assert isinstance(table, Table)
         assert table.title == "Conductor Dashboard (milestone: all)"
-        assert len(table.columns) == 5
+        assert len(table.columns) == 7
         assert table.row_count == 2
 
     def test_render_dashboard_empty(self, tmp_path: Path) -> None:
@@ -275,12 +277,16 @@ class TestConductorRunner:
         dag.add_node(1, "Ready issue", phase="pending")
         dag.add_node(2, "Blocked issue", blocked_by=[1], phase="pending")
 
-        with patch.object(runner, "_dispatch_issue") as mock_dispatch:
+        with (
+            patch.object(runner, "_dispatch_issue") as mock_dispatch,
+            patch.object(runner, "_submit_dispatch") as mock_submit,
+        ):
             runner._tick(dag)
 
-        mock_dispatch.assert_called_once()
-        dispatched_node = mock_dispatch.call_args[0][0]
-        assert dispatched_node.number == 1
+        mock_submit.assert_called_once()
+        call_args = mock_submit.call_args[0]
+        assert call_args[0].number == 1
+        assert call_args[1] == "design"
 
     def test_tick_skips_merged_and_pr_issues(self, tmp_path: Path) -> None:
         from conductor.dag import DAG
@@ -293,10 +299,10 @@ class TestConductorRunner:
         dag.add_node(2, "In PR", phase="pr")
         dag.add_node(3, "Closed", phase="closed")
 
-        with patch.object(runner, "_dispatch_issue") as mock_dispatch:
+        with patch.object(runner, "_submit_dispatch") as mock_submit:
             runner._tick(dag)
 
-        mock_dispatch.assert_not_called()
+        mock_submit.assert_not_called()
 
     def test_tick_uses_design_for_unknown_phase(self, tmp_path: Path) -> None:
         from conductor.dag import DAG
@@ -307,11 +313,11 @@ class TestConductorRunner:
         dag = DAG()
         dag.add_node(1, "Unknown phase", phase="pending")
 
-        with patch.object(runner, "_dispatch_issue") as mock_dispatch:
+        with patch.object(runner, "_submit_dispatch") as mock_submit:
             runner._tick(dag)
 
-        mock_dispatch.assert_called_once()
-        assert mock_dispatch.call_args[0][1] == "design"
+        mock_submit.assert_called_once()
+        assert mock_submit.call_args[0][1] == "design"
 
     def test_tick_uses_existing_phase_when_known(
         self, tmp_path: Path
@@ -324,11 +330,11 @@ class TestConductorRunner:
         dag = DAG()
         dag.add_node(1, "In plan phase", phase="plan")
 
-        with patch.object(runner, "_dispatch_issue") as mock_dispatch:
+        with patch.object(runner, "_submit_dispatch") as mock_submit:
             runner._tick(dag)
 
-        mock_dispatch.assert_called_once()
-        assert mock_dispatch.call_args[0][1] == "plan"
+        mock_submit.assert_called_once()
+        assert mock_submit.call_args[0][1] == "plan"
 
     def test_dispatch_issue_calls_run_phase(self, tmp_path: Path) -> None:
         from conductor.dag import DAGNode
@@ -384,7 +390,7 @@ class TestConductorRunner:
         table = runner._render_dashboard(dag)
 
         assert table.row_count == 2
-        assert len(table.columns) == 5
+        assert len(table.columns) == 7
 
 
 class TestListOpenIssues:
@@ -608,7 +614,9 @@ class TestEpicAndMilestoneFiltering:
                 )
             )
             mock_db_cls.return_value = MagicMock()
-            mock_pool_cls.return_value = MagicMock()
+            mock_pool = MagicMock()
+            mock_pool.pane_activity_age.return_value = None
+            mock_pool_cls.return_value = mock_pool
             runner = ConductorRunner(tmp_path, repo="owner/repo")
         return runner
 
@@ -701,17 +709,17 @@ class TestEpicAndMilestoneFiltering:
 
         runner = self._make_runner(tmp_path)
         runner.db.list_issues.return_value = []
-        runner._dispatches[1] = "agent-1"
+        runner._dispatches[1] = ("agent-1", 0.0, None)
 
         dag = DAG()
         dag.add_node(1, "Already dispatched", phase="design")
         dag.add_node(2, "Ready", phase="pending")
 
-        with patch.object(runner, "_dispatch_issue") as mock_dispatch:
+        with patch.object(runner, "_submit_dispatch") as mock_submit:
             runner._tick(dag)
 
-        mock_dispatch.assert_called_once()
-        assert mock_dispatch.call_args[0][0].number == 2
+        mock_submit.assert_called_once()
+        assert mock_submit.call_args[0][0].number == 2
 
     def test_dispatch_tracks_and_clears_agent(self, tmp_path: Path) -> None:
         from conductor.dag import DAGNode
@@ -742,15 +750,17 @@ class TestEpicAndMilestoneFiltering:
 
         runner = self._make_runner(tmp_path)
         runner.db.list_issues.return_value = []
-        runner._dispatches[1] = "agent-0"
+        runner._dispatches[1] = ("agent-0", 0.0, "conductor-agent-0")
 
         dag = DAG()
         dag.add_node(1, "Active issue", phase="execute")
 
         table = runner._render_dashboard(dag)
 
-        assert len(table.columns) == 5
+        assert len(table.columns) == 7
         assert table.columns[3].header == "Agent"
+        assert table.columns[4].header == "Elapsed"
+        assert table.columns[5].header == "Activity"
 
     def test_dashboard_has_pool_caption(self, tmp_path: Path) -> None:
         runner = self._make_runner(tmp_path)
@@ -762,6 +772,33 @@ class TestEpicAndMilestoneFiltering:
 
         assert "Pool:" in table.caption
         assert "0/3 busy" in table.caption
+
+    def test_format_elapsed(self, tmp_path: Path) -> None:
+        from conductor.runner import ConductorRunner
+
+        assert ConductorRunner._format_elapsed(5) == "5s"
+        assert ConductorRunner._format_elapsed(65) == "1m05s"
+        assert ConductorRunner._format_elapsed(3661) == "1h01m"
+
+    def test_dashboard_elapsed_and_activity(self, tmp_path: Path) -> None:
+        import time
+
+        from conductor.dag import DAG
+
+        runner = self._make_runner(tmp_path)
+        runner.db.list_issues.return_value = []
+        runner.pool.pane_activity_age = MagicMock(return_value=2.0)
+
+        dag = DAG()
+        dag.add_node(1, "Active issue", phase="execute")
+        runner._dispatches[1] = (
+            "agent-1",
+            time.monotonic() - 90,
+            "conductor-agent-0",
+        )
+
+        table = runner._render_dashboard(dag)
+        assert table.row_count == 1
 
 
 class TestAsyncDispatch:
@@ -779,7 +816,9 @@ class TestAsyncDispatch:
                 )
             )
             mock_db_cls.return_value = MagicMock()
-            mock_pool_cls.return_value = MagicMock()
+            mock_pool = MagicMock()
+            mock_pool.pane_activity_age.return_value = None
+            mock_pool_cls.return_value = mock_pool
             runner = ConductorRunner(tmp_path, repo="owner/repo")
         return runner
 
@@ -802,14 +841,16 @@ class TestAsyncDispatch:
             runner._submit_dispatch(node, "design")
 
         assert 5 in runner._dispatches
-        assert runner._dispatches[5] == "agent-5"
+        agent_name, started_at, session_name = runner._dispatches[5]
+        assert agent_name == "agent-5"
+        assert isinstance(started_at, float)
         assert 5 in runner._futures
 
     def test_submit_dispatch_skips_if_already_dispatched(self, tmp_path: Path) -> None:
         from conductor.dag import DAGNode
 
         runner = self._make_runner(tmp_path)
-        runner._dispatches[5] = "agent-5"
+        runner._dispatches[5] = ("agent-5", 0.0, None)
         node = DAGNode(number=5, title="Test", phase="design")
 
         with patch.object(runner, "_dispatch_issue") as mock_d:
