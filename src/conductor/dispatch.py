@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -36,7 +37,9 @@ def _write_input(
     return path
 
 
-def _read_output(project_root: Path, issue_number: int, step_id: str) -> str | None:
+def _read_output(
+    project_root: Path, issue_number: int, step_id: str
+) -> str | None:
     """Read output JSON if file exists, return None if not yet written."""
     path = (
         project_root
@@ -57,11 +60,17 @@ def _validate_output[T: BaseModel](raw_json: str, output_type: type[T]) -> T:
 
 
 def _build_prompt(input_path: Path, output_path: Path) -> str:
-    """Build the prompt text sent to the agent."""
+    """Build the prompt text sent to the agent.
+
+    The input file contains a JSON object describing the task.
+    The agent must write a valid JSON result matching the expected schema.
+    """
     return (
-        f"Read {input_path}. "
-        f"Perform the task described. "
-        f"Write your JSON result to {output_path}."
+        f"Read the task specification at {input_path}. "
+        f"It contains a JSON object with the issue context, phase, and requirements. "
+        f"Complete the task described in the specification. "
+        f"Write ONLY valid JSON output (no markdown, no commentary) to {output_path}. "
+        f"The output must match the schema expected by the conductor pipeline."
     )
 
 
@@ -78,6 +87,7 @@ def dispatch_step[T: BaseModel](
     max_validation_retries: int = 2,
     poll_interval: float = 2.0,
     timeout: float | None = None,
+    shutdown_event: threading.Event | None = None,
 ) -> StepResult:
     """Dispatch a single step to an agent and return validated output."""
     tier = _resolve_step_tier(config.steps, step_id)
@@ -110,13 +120,20 @@ def dispatch_step[T: BaseModel](
         retries_left = max_validation_retries
 
         while True:
+            if shutdown_event is not None and shutdown_event.is_set():
+                db.update_step(step_row_id, status="cancelled", error="shutdown")
+                return StepResult(success=False, error="shutdown")
+
             if deadline is not None and time.monotonic() >= deadline:
                 db.update_step(step_row_id, status="failed", error="timeout")
                 return StepResult(success=False, error="timeout")
 
             raw = _read_output(project_root, issue_number, step_id)
             if raw is None:
-                time.sleep(poll_interval)
+                if shutdown_event is not None:
+                    shutdown_event.wait(timeout=poll_interval)
+                else:
+                    time.sleep(poll_interval)
                 continue
 
             try:
@@ -124,7 +141,9 @@ def dispatch_step[T: BaseModel](
             except (ValidationError, json.JSONDecodeError) as exc:
                 if retries_left <= 0:
                     error_msg = f"Validation failed after retries: {exc}"
-                    db.update_step(step_row_id, status="failed", error=error_msg)
+                    db.update_step(
+                        step_row_id, status="failed", error=error_msg
+                    )
                     return StepResult(success=False, error=error_msg)
                 retries_left -= 1
                 output_path.unlink(missing_ok=True)

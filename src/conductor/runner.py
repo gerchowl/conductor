@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import re
 import signal
 import subprocess
-import time
+import threading
 from pathlib import Path
 
 from rich.console import Console
@@ -31,7 +32,9 @@ def _list_open_issues(repo: str | None) -> list[dict]:
         cmd.extend(["--repo", repo])
     cmd.extend(["--json", "number,title,body,labels,state,milestone"])
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=True
+        )
     except (subprocess.CalledProcessError, FileNotFoundError):
         logger.warning("Failed to fetch issues from GitHub")
         return []
@@ -70,23 +73,17 @@ def _semver_key(title: str) -> tuple[int, ...]:
 
 def _resolve_target_milestone(repo: str | None) -> str | None:
     """Fetch open milestones, return the one with the lowest semver."""
-    cmd = [
-        "gh",
-        "api",
-        "repos/{owner}/{repo}/milestones",
-        "--jq",
-        '.[] | select(.state=="open") | .title',
-    ]
+    cmd = ["gh", "api", "repos/{owner}/{repo}/milestones", "--jq",
+           '.[] | select(.state=="open") | .title']
     if repo:
         cmd = [
-            "gh",
-            "api",
-            f"repos/{repo}/milestones",
-            "--jq",
-            '.[] | select(.state=="open") | .title',
+            "gh", "api", f"repos/{repo}/milestones",
+            "--jq", '.[] | select(.state=="open") | .title',
         ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=True
+        )
     except (subprocess.CalledProcessError, FileNotFoundError):
         logger.warning("Failed to fetch milestones from GitHub")
         return None
@@ -98,7 +95,9 @@ def _resolve_target_milestone(repo: str | None) -> str | None:
 
 
 class ConductorRunner:
-    def __init__(self, project_root: Path, repo: str | None = None) -> None:
+    def __init__(
+        self, project_root: Path, repo: str | None = None
+    ) -> None:
         self.project_root = project_root
         self.repo = repo
         self.config = load_config(project_root)
@@ -108,12 +107,29 @@ class ConductorRunner:
             idle_ttl_seconds=self.config.pool.idle_ttl_seconds,
             default_model=self.config.pool.default_model,
         )
-        self._shutdown = False
+        self._shutdown_event = threading.Event()
         self._dispatches: dict[int, str] = {}
+        self._dispatch_lock = threading.Lock()
         self._target_milestone: str | None = None
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.config.pool.max_sessions,
+        )
+        self._futures: dict[int, concurrent.futures.Future[None]] = {}
+
+    @property
+    def _shutdown(self) -> bool:
+        return self._shutdown_event.is_set()
+
+    @_shutdown.setter
+    def _shutdown(self, value: bool) -> None:
+        if value:
+            self._shutdown_event.set()
+        else:
+            self._shutdown_event.clear()
 
     def run(self, poll_interval: float = 10.0) -> None:
         signal.signal(signal.SIGINT, self._handle_shutdown)
+        signal.signal(signal.SIGTERM, self._handle_shutdown)
         console = Console()
 
         self._target_milestone = _resolve_target_milestone(self.repo)
@@ -124,8 +140,9 @@ class ConductorRunner:
         else:
             console.print("[bold]Conductor starting (no milestone filter)[/bold]")
 
-        dag = self._refresh_dag()
-        self._sync_dag_to_db(dag)
+        issues = _list_open_issues(self.repo)
+        dag = self._refresh_dag(issues)
+        self._sync_dag_to_db(dag, issues)
 
         with Live(
             self._render_dashboard(dag),
@@ -134,18 +151,18 @@ class ConductorRunner:
         ) as live:
             while not self._shutdown:
                 self._tick(dag)
+                self._reap_futures(dag)
                 live.update(self._render_dashboard(dag))
                 flush_sync_queue(self.db, self.repo)
                 self.pool.drain_idle()
 
-                for _ in range(int(poll_interval)):
-                    if self._shutdown:
-                        break
-                    time.sleep(1)
+                if self._shutdown_event.wait(timeout=poll_interval):
+                    break
 
                 self._target_milestone = _resolve_target_milestone(self.repo)
-                dag = self._refresh_dag()
-                self._sync_dag_to_db(dag)
+                issues = _list_open_issues(self.repo)
+                dag = self._refresh_dag(issues)
+                self._sync_dag_to_db(dag, issues)
 
         self._cleanup()
         console.print("[bold]Conductor stopped.[/bold]")
@@ -157,16 +174,40 @@ class ConductorRunner:
         for node in ready:
             if node.phase in ("merged", "pr", "closed"):
                 continue
-            if node.number in self._dispatches:
-                continue
-            current_phase = node.phase if node.phase in PHASE_ORDER else "design"
-            self._dispatch_issue(node, current_phase)
+            with self._dispatch_lock:
+                if node.number in self._dispatches:
+                    continue
+            current_phase = (
+                node.phase if node.phase in PHASE_ORDER else "design"
+            )
+            self._submit_dispatch(node, current_phase)
 
-    def _refresh_dag(self) -> DAG:
-        issues = _list_open_issues(self.repo)
+    def _submit_dispatch(self, node: DAGNode, phase: str) -> None:
+        with self._dispatch_lock:
+            if node.number in self._dispatches:
+                return
+            self._dispatches[node.number] = f"agent-{node.number}"
+        future = self._executor.submit(self._dispatch_issue, node, phase)
+        self._futures[node.number] = future
+
+    def _reap_futures(self, dag: DAG) -> None:
+        done = [n for n, f in self._futures.items() if f.done()]
+        for number in done:
+            future = self._futures.pop(number)
+            exc = future.exception()
+            if exc:
+                logger.error("Dispatch #%d raised: %s", number, exc)
+            db_issue = self.db.get_issue(number)
+            if db_issue:
+                node = dag.get_node(number)
+                if node:
+                    node.phase = db_issue["phase"]
+
+    def _refresh_dag(self, issues: list[dict] | None = None) -> DAG:
+        if issues is None:
+            issues = _list_open_issues(self.repo)
         filtered = [
-            i
-            for i in issues
+            i for i in issues
             if not _is_epic(i["title"])
             and (
                 self._target_milestone is None
@@ -175,9 +216,17 @@ class ConductorRunner:
         ]
         return build_dag_from_issues(filtered)
 
-    def _sync_dag_to_db(self, dag: DAG) -> None:
-        """Sync DAG nodes to DB, preserving local phase."""
+    def _sync_dag_to_db(
+        self, dag: DAG, issues: list[dict] | None = None
+    ) -> None:
+        """Sync DAG nodes to DB, preserving local phase and caching body/labels."""
+        if issues is None:
+            issues = []
+        issues_by_number = {i["number"]: i for i in issues}
         for node in dag.nodes:
+            issue_data = issues_by_number.get(node.number, {})
+            body = issue_data.get("body", "")
+            labels = json.dumps(issue_data.get("labels", []))
             existing = self.db.get_issue(node.number)
             if existing is None:
                 self.db.upsert_issue(
@@ -186,6 +235,8 @@ class ConductorRunner:
                     phase="pending",
                     milestone=self._target_milestone,
                     blocked_by=json.dumps(node.blocked_by),
+                    body=body,
+                    labels=labels,
                 )
             else:
                 self.db.update_issue(
@@ -193,6 +244,8 @@ class ConductorRunner:
                     title=node.title,
                     milestone=self._target_milestone,
                     blocked_by=json.dumps(node.blocked_by),
+                    body=body,
+                    labels=labels,
                 )
             db_issue = self.db.get_issue(node.number)
             if db_issue:
@@ -217,8 +270,8 @@ class ConductorRunner:
             project_root=self.project_root,
             worktree=worktree,
             repo=self.repo,
+            shutdown_event=self._shutdown_event,
         )
-        self._dispatches[node.number] = f"agent-{node.number}"
         try:
             result = run_phase(ctx, phase)
             if result.success:
@@ -231,7 +284,8 @@ class ConductorRunner:
                     result.error,
                 )
         finally:
-            self._dispatches.pop(node.number, None)
+            with self._dispatch_lock:
+                self._dispatches.pop(node.number, None)
 
     def _render_dashboard(self, dag: DAG | None = None) -> Table:
         ms_label = self._target_milestone or "all"
@@ -247,11 +301,14 @@ class ConductorRunner:
 
         for node in nodes:
             blocked_str = (
-                ", ".join(f"#{b}" for b in node.blocked_by) if node.blocked_by else "-"
+                ", ".join(f"#{b}" for b in node.blocked_by)
+                if node.blocked_by
+                else "-"
             )
             is_ready = not dag.is_blocked(node.number, completed)
             phase_style = "bold green" if is_ready else "dim"
-            agent = self._dispatches.get(node.number, "-")
+            with self._dispatch_lock:
+                agent = self._dispatches.get(node.number, "-")
             table.add_row(
                 str(node.number),
                 node.title,
@@ -267,8 +324,9 @@ class ConductorRunner:
         return table
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
-        self._shutdown = True
+        self._shutdown_event.set()
 
     def _cleanup(self) -> None:
+        self._executor.shutdown(wait=False)
         self.pool.shutdown()
         self.db.close()

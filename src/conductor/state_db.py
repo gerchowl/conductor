@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS issues (
     blocked_by TEXT,
     branch TEXT,
     pr_number INTEGER,
-    stuck_reason TEXT
+    stuck_reason TEXT,
+    body TEXT,
+    labels TEXT
 );
 
 CREATE TABLE IF NOT EXISTS steps (
@@ -59,6 +61,8 @@ _ISSUE_COLUMNS = (
 
 _MIGRATIONS = [
     "ALTER TABLE issues ADD COLUMN milestone TEXT",
+    "ALTER TABLE issues ADD COLUMN body TEXT",
+    "ALTER TABLE issues ADD COLUMN labels TEXT",
 ]
 
 
@@ -95,7 +99,9 @@ class StateDB:
         fields: dict[str, Any] = {"number": number, "title": title, **kwargs}
         cols = ", ".join(fields)
         placeholders = ", ".join(["?"] * len(fields))
-        update_clause = ", ".join(f"{c}=excluded.{c}" for c in fields if c != "number")
+        update_clause = ", ".join(
+            f"{c}=excluded.{c}" for c in fields if c != "number"
+        )
         sql = (
             f"INSERT INTO issues ({cols}) VALUES ({placeholders}) "
             f"ON CONFLICT(number) DO UPDATE SET {update_clause}"
@@ -153,9 +159,12 @@ class StateDB:
 
     # ── GH Sync queue ────────────────────────────────────────────────
 
-    def enqueue_sync(self, issue_number: int, sync_type: str, payload: str) -> int:
+    def enqueue_sync(
+        self, issue_number: int, sync_type: str, payload: str
+    ) -> int:
         cur = self._conn.execute(
-            "INSERT INTO gh_sync (issue_number, sync_type, payload) VALUES (?, ?, ?)",
+            "INSERT INTO gh_sync (issue_number, sync_type, payload) "
+            "VALUES (?, ?, ?)",
             (issue_number, sync_type, payload),
         )
         self._conn.commit()
@@ -168,9 +177,13 @@ class StateDB:
         return [dict(r) for r in rows]
 
     def mark_synced(self, sync_id: int) -> None:
-        self._conn.execute("UPDATE gh_sync SET status='synced' WHERE id=?", (sync_id,))
+        self._conn.execute(
+            "UPDATE gh_sync SET status='synced' WHERE id=?", (sync_id,)
+        )
         self._conn.commit()
 
     def mark_sync_failed(self, sync_id: int) -> None:
-        self._conn.execute("UPDATE gh_sync SET status='failed' WHERE id=?", (sync_id,))
+        self._conn.execute(
+            "UPDATE gh_sync SET status='failed' WHERE id=?", (sync_id,)
+        )
         self._conn.commit()

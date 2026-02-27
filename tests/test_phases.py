@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -41,7 +42,9 @@ def _make_config() -> ConductorConfig:
 @pytest.fixture()
 def db(tmp_path: Path) -> StateDB:
     state = StateDB(tmp_path / "state.db")
-    state.upsert_issue(42, "Test issue")
+    state.upsert_issue(
+        42, "Test issue", body="Implement feature X", labels=json.dumps([])
+    )
     return state
 
 
@@ -109,8 +112,12 @@ class TestRunPhaseUnknown:
 
 
 class TestRunPhaseDispatch:
-    def test_dispatches_to_correct_handler(self, ctx: PhaseContext) -> None:
-        with patch("conductor.phases._run_design") as mock_design:
+    def test_dispatches_to_correct_handler(
+        self, ctx: PhaseContext
+    ) -> None:
+        with patch(
+            "conductor.phases._run_design"
+        ) as mock_design:
             mock_design.return_value = PhaseResult("design", True)
             result = run_phase(ctx, "design")
             mock_design.assert_called_once_with(ctx)
@@ -132,15 +139,21 @@ class TestRunPhaseDispatch:
 
 
 class TestRunAllPhases:
-    def test_runs_all_when_all_succeed(self, ctx: PhaseContext) -> None:
+    def test_runs_all_when_all_succeed(
+        self, ctx: PhaseContext
+    ) -> None:
         with patch("conductor.phases.run_phase") as mock_run:
-            mock_run.side_effect = [PhaseResult(p, True) for p in PHASE_ORDER]
+            mock_run.side_effect = [
+                PhaseResult(p, True) for p in PHASE_ORDER
+            ]
             results = run_all_phases(ctx)
             assert len(results) == 7
             assert all(r.success for r in results)
             assert [r.phase for r in results] == PHASE_ORDER
 
-    def test_stops_on_first_failure(self, ctx: PhaseContext) -> None:
+    def test_stops_on_first_failure(
+        self, ctx: PhaseContext
+    ) -> None:
         with patch("conductor.phases.run_phase") as mock_run:
             mock_run.side_effect = [
                 PhaseResult("design", True),
@@ -154,9 +167,14 @@ class TestRunAllPhases:
             assert results[2].success is False
             assert results[2].error == "boom"
 
-    def test_starts_from_given_phase(self, ctx: PhaseContext) -> None:
+    def test_starts_from_given_phase(
+        self, ctx: PhaseContext
+    ) -> None:
         with patch("conductor.phases.run_phase") as mock_run:
-            mock_run.side_effect = [PhaseResult(p, True) for p in PHASE_ORDER[3:]]
+            mock_run.side_effect = [
+                PhaseResult(p, True)
+                for p in PHASE_ORDER[3:]
+            ]
             results = run_all_phases(ctx, start_phase="test")
             assert len(results) == 4
             assert [r.phase for r in results] == [
@@ -166,7 +184,9 @@ class TestRunAllPhases:
                 "pr",
             ]
 
-    def test_empty_when_start_phase_not_found(self, ctx: PhaseContext) -> None:
+    def test_empty_when_start_phase_not_found(
+        self, ctx: PhaseContext
+    ) -> None:
         results = run_all_phases(ctx, start_phase="nonexistent")
         assert results == []
 
@@ -174,23 +194,17 @@ class TestRunAllPhases:
 class TestDesignPhaseHappyPath:
     @patch("conductor.phases.add_label")
     @patch("conductor.phases.post_comment")
-    @patch("conductor.phases.read_issue")
     @patch("conductor.phases.dispatch_step")
     def test_design_succeeds(
         self,
         mock_dispatch: MagicMock,
-        mock_read: MagicMock,
         mock_comment: MagicMock,
         mock_label: MagicMock,
         ctx: PhaseContext,
     ) -> None:
-        mock_read.return_value = MagicMock(
-            number=42,
-            title="Test",
-            body="body",
-            labels=["bug"],
+        mock_dispatch.return_value = StepResult(
+            success=True, output=MagicMock()
         )
-        mock_dispatch.return_value = StepResult(success=True, output=MagicMock())
 
         result = run_phase(ctx, "design")
 
@@ -198,7 +212,9 @@ class TestDesignPhaseHappyPath:
         assert result.phase == "design"
         mock_dispatch.assert_called_once()
         mock_comment.assert_called_once()
-        mock_label.assert_called_once_with(42, "phase:design", repo="owner/repo")
+        mock_label.assert_called_once_with(
+            42, "phase:design", repo="owner/repo"
+        )
 
         issue = ctx.db.get_issue(42)
         assert issue is not None
@@ -206,21 +222,15 @@ class TestDesignPhaseHappyPath:
 
 
 class TestDesignPhaseFailure:
-    @patch("conductor.phases.read_issue")
     @patch("conductor.phases.dispatch_step")
     def test_design_dispatch_failure(
         self,
         mock_dispatch: MagicMock,
-        mock_read: MagicMock,
         ctx: PhaseContext,
     ) -> None:
-        mock_read.return_value = MagicMock(
-            number=42,
-            title="Test",
-            body="body",
-            labels=[],
+        mock_dispatch.return_value = StepResult(
+            success=False, error="agent died"
         )
-        mock_dispatch.return_value = StepResult(success=False, error="agent died")
 
         result = run_phase(ctx, "design")
         assert result.success is False
@@ -228,17 +238,17 @@ class TestDesignPhaseFailure:
 
 
 class TestDesignPhaseException:
-    @patch("conductor.phases.read_issue")
+    @patch("conductor.phases.dispatch_step")
     def test_design_catches_exception(
         self,
-        mock_read: MagicMock,
+        mock_dispatch: MagicMock,
         ctx: PhaseContext,
     ) -> None:
-        mock_read.side_effect = RuntimeError("gh CLI failed")
+        mock_dispatch.side_effect = RuntimeError("dispatch failed")
 
         result = run_phase(ctx, "design")
         assert result.success is False
-        assert "gh CLI failed" in (result.error or "")
+        assert "dispatch failed" in (result.error or "")
 
 
 class TestDispatchSwarm:
@@ -248,7 +258,9 @@ class TestDispatchSwarm:
         mock_dispatch: MagicMock,
         ctx: PhaseContext,
     ) -> None:
-        mock_dispatch.return_value = StepResult(success=True, output=MagicMock())
+        mock_dispatch.return_value = StepResult(
+            success=True, output=MagicMock()
+        )
         inputs: list[tuple[str, object]] = [
             ("1", MagicMock()),
             ("2", MagicMock()),

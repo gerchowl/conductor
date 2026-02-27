@@ -34,13 +34,10 @@ def test_run_help(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_init_calls_init_config(tmp_path: Path) -> None:
-    with (
-        patch(
-            "conductor.config.init_config",
-            return_value=tmp_path / ".conductor" / "conductor.toml",
-        ) as mock_init,
-        patch("conductor.cli.Path") as mock_path_cls,
-    ):
+    with patch(
+        "conductor.config.init_config",
+        return_value=tmp_path / ".conductor" / "conductor.toml",
+    ) as mock_init, patch("conductor.cli.Path") as mock_path_cls:
         mock_path_cls.cwd.return_value = tmp_path
         result = main(["--init"])
 
@@ -50,10 +47,9 @@ def test_init_calls_init_config(tmp_path: Path) -> None:
 
 def test_run_creates_runner_and_calls_run(tmp_path: Path) -> None:
     mock_runner = MagicMock()
-    with (
-        patch("conductor.runner.ConductorRunner", return_value=mock_runner) as mock_cls,
-        patch("conductor.cli.Path") as mock_path_cls,
-    ):
+    with patch(
+        "conductor.runner.ConductorRunner", return_value=mock_runner
+    ) as mock_cls, patch("conductor.cli.Path") as mock_path_cls:
         mock_path_cls.cwd.return_value = tmp_path
         result = main(["run", "--repo", "owner/repo", "--poll-interval", "5"])
 
@@ -77,11 +73,9 @@ class TestConductorRunner:
     def _make_runner(self, tmp_path: Path) -> object:
         from conductor.runner import ConductorRunner
 
-        with (
-            patch("conductor.runner.load_config") as mock_cfg,
-            patch("conductor.runner.StateDB") as mock_db_cls,
-            patch("conductor.runner.AgentPool") as mock_pool_cls,
-        ):
+        with patch("conductor.runner.load_config") as mock_cfg, patch(
+            "conductor.runner.StateDB"
+        ) as mock_db_cls, patch("conductor.runner.AgentPool") as mock_pool_cls:
             mock_cfg.return_value = MagicMock(
                 pool=MagicMock(
                     max_sessions=3,
@@ -97,11 +91,9 @@ class TestConductorRunner:
     def test_init_creates_config_db_pool(self, tmp_path: Path) -> None:
         from conductor.runner import ConductorRunner
 
-        with (
-            patch("conductor.runner.load_config") as mock_cfg,
-            patch("conductor.runner.StateDB") as mock_db_cls,
-            patch("conductor.runner.AgentPool") as mock_pool_cls,
-        ):
+        with patch("conductor.runner.load_config") as mock_cfg, patch(
+            "conductor.runner.StateDB"
+        ) as mock_db_cls, patch("conductor.runner.AgentPool") as mock_pool_cls:
             mock_cfg.return_value = MagicMock(
                 pool=MagicMock(
                     max_sessions=3,
@@ -195,7 +187,9 @@ class TestConductorRunner:
                 "milestone": None,
             },
         ]
-        with patch("conductor.runner._list_open_issues", return_value=fake_issues):
+        with patch(
+            "conductor.runner._list_open_issues", return_value=fake_issues
+        ):
             dag = runner._refresh_dag()
 
         assert len(dag.nodes) == 2
@@ -206,9 +200,13 @@ class TestConductorRunner:
         assert node1 is not None
         assert node1.phase == "pending"
 
-    def test_refresh_dag_returns_empty_dag_on_failure(self, tmp_path: Path) -> None:
+    def test_refresh_dag_returns_empty_dag_on_failure(
+        self, tmp_path: Path
+    ) -> None:
         runner = self._make_runner(tmp_path)
-        with patch("conductor.runner._list_open_issues", return_value=[]):
+        with patch(
+            "conductor.runner._list_open_issues", return_value=[]
+        ):
             dag = runner._refresh_dag()
 
         assert len(dag.nodes) == 0
@@ -223,25 +221,27 @@ class TestConductorRunner:
         dag.add_node(1, "Issue A", phase="design")
         dag.add_node(2, "Issue B", blocked_by=[1], phase="pending")
 
-        runner._sync_dag_to_db(dag)
+        issues = [
+            {"number": 1, "title": "Issue A", "body": "body A", "labels": ["bug"]},
+            {"number": 2, "title": "Issue B", "body": "body B", "labels": []},
+        ]
+        runner._sync_dag_to_db(dag, issues)
 
         assert runner.db.upsert_issue.call_count == 2
         runner.db.upsert_issue.assert_any_call(
-            number=1,
-            title="Issue A",
-            phase="pending",
-            milestone=None,
-            blocked_by="[]",
+            number=1, title="Issue A", phase="pending",
+            milestone=None, blocked_by="[]",
+            body="body A", labels='["bug"]',
         )
         runner.db.upsert_issue.assert_any_call(
-            number=2,
-            title="Issue B",
-            phase="pending",
-            milestone=None,
-            blocked_by="[1]",
+            number=2, title="Issue B", phase="pending",
+            milestone=None, blocked_by="[1]",
+            body="body B", labels="[]",
         )
 
-    def test_sync_dag_to_db_preserves_existing_phase(self, tmp_path: Path) -> None:
+    def test_sync_dag_to_db_preserves_existing_phase(
+        self, tmp_path: Path
+    ) -> None:
         from conductor.dag import DAG
 
         runner = self._make_runner(tmp_path)
@@ -253,14 +253,15 @@ class TestConductorRunner:
         dag = DAG()
         dag.add_node(1, "Issue A")
 
-        runner._sync_dag_to_db(dag)
+        issues = [
+            {"number": 1, "title": "Issue A", "body": "desc", "labels": []},
+        ]
+        runner._sync_dag_to_db(dag, issues)
 
         runner.db.upsert_issue.assert_not_called()
         runner.db.update_issue.assert_called_once_with(
-            1,
-            title="Issue A",
-            milestone=None,
-            blocked_by="[]",
+            1, title="Issue A", milestone=None, blocked_by="[]",
+            body="desc", labels="[]",
         )
         assert dag.get_node(1).phase == "execute"
 
@@ -312,7 +313,9 @@ class TestConductorRunner:
         mock_dispatch.assert_called_once()
         assert mock_dispatch.call_args[0][1] == "design"
 
-    def test_tick_uses_existing_phase_when_known(self, tmp_path: Path) -> None:
+    def test_tick_uses_existing_phase_when_known(
+        self, tmp_path: Path
+    ) -> None:
         from conductor.dag import DAG
 
         runner = self._make_runner(tmp_path)
@@ -336,7 +339,9 @@ class TestConductorRunner:
 
         with patch(
             "conductor.runner.run_phase",
-            return_value=PhaseResult(phase="design", success=True),
+            return_value=PhaseResult(
+                phase="design", success=True
+            ),
         ) as mock_run:
             runner._dispatch_issue(node, "design")
 
@@ -353,21 +358,20 @@ class TestConductorRunner:
         runner = self._make_runner(tmp_path)
         node = DAGNode(number=7, title="Failing", phase="verify")
 
-        with (
-            patch(
-                "conductor.runner.run_phase",
-                return_value=PhaseResult(
-                    phase="verify", success=False, error="timeout"
-                ),
+        with patch(
+            "conductor.runner.run_phase",
+            return_value=PhaseResult(
+                phase="verify", success=False, error="timeout"
             ),
-            patch("conductor.runner.logger") as mock_logger,
-        ):
+        ), patch("conductor.runner.logger") as mock_logger:
             runner._dispatch_issue(node, "verify")
 
         mock_logger.warning.assert_called_once()
         assert "timeout" in mock_logger.warning.call_args[0][3]
 
-    def test_render_dashboard_shows_blocked_style(self, tmp_path: Path) -> None:
+    def test_render_dashboard_shows_blocked_style(
+        self, tmp_path: Path
+    ) -> None:
         from conductor.dag import DAG
 
         runner = self._make_runner(tmp_path)
@@ -387,18 +391,16 @@ class TestListOpenIssues:
     def test_success_with_repo_includes_milestone(self) -> None:
         from conductor.runner import _list_open_issues
 
-        gh_output = json.dumps(
-            [
-                {
-                    "number": 10,
-                    "title": "Issue ten",
-                    "body": "Blocked by: #5",
-                    "labels": [{"name": "bug"}, {"name": "phase:design"}],
-                    "state": "OPEN",
-                    "milestone": {"title": "0.1.0"},
-                },
-            ]
-        )
+        gh_output = json.dumps([
+            {
+                "number": 10,
+                "title": "Issue ten",
+                "body": "Blocked by: #5",
+                "labels": [{"name": "bug"}, {"name": "phase:design"}],
+                "state": "OPEN",
+                "milestone": {"title": "0.1.0"},
+            },
+        ])
         with patch("conductor.runner.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout=gh_output)
             result = _list_open_issues("owner/repo")
@@ -414,18 +416,16 @@ class TestListOpenIssues:
     def test_success_without_repo(self) -> None:
         from conductor.runner import _list_open_issues
 
-        gh_output = json.dumps(
-            [
-                {
-                    "number": 1,
-                    "title": "Local",
-                    "body": "",
-                    "labels": [],
-                    "state": "OPEN",
-                    "milestone": None,
-                },
-            ]
-        )
+        gh_output = json.dumps([
+            {
+                "number": 1,
+                "title": "Local",
+                "body": "",
+                "labels": [],
+                "state": "OPEN",
+                "milestone": None,
+            },
+        ])
         with patch("conductor.runner.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout=gh_output)
             result = _list_open_issues(None)
@@ -459,18 +459,16 @@ class TestListOpenIssues:
     def test_normalizes_string_labels(self) -> None:
         from conductor.runner import _list_open_issues
 
-        gh_output = json.dumps(
-            [
-                {
-                    "number": 1,
-                    "title": "String labels",
-                    "body": "",
-                    "labels": ["bug", "phase:plan"],
-                    "state": "OPEN",
-                    "milestone": None,
-                },
-            ]
-        )
+        gh_output = json.dumps([
+            {
+                "number": 1,
+                "title": "String labels",
+                "body": "",
+                "labels": ["bug", "phase:plan"],
+                "state": "OPEN",
+                "milestone": None,
+            },
+        ])
         with patch("conductor.runner.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout=gh_output)
             result = _list_open_issues(None)
@@ -480,16 +478,14 @@ class TestListOpenIssues:
     def test_handles_missing_body_and_milestone(self) -> None:
         from conductor.runner import _list_open_issues
 
-        gh_output = json.dumps(
-            [
-                {
-                    "number": 1,
-                    "title": "No body",
-                    "labels": [],
-                    "state": "OPEN",
-                },
-            ]
-        )
+        gh_output = json.dumps([
+            {
+                "number": 1,
+                "title": "No body",
+                "labels": [],
+                "state": "OPEN",
+            },
+        ])
         with patch("conductor.runner.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout=gh_output)
             result = _list_open_issues(None)
@@ -500,18 +496,16 @@ class TestListOpenIssues:
     def test_milestone_dict_extraction(self) -> None:
         from conductor.runner import _list_open_issues
 
-        gh_output = json.dumps(
-            [
-                {
-                    "number": 1,
-                    "title": "With milestone",
-                    "body": "",
-                    "labels": [],
-                    "state": "OPEN",
-                    "milestone": {"title": "1.2.3", "number": 5},
-                },
-            ]
-        )
+        gh_output = json.dumps([
+            {
+                "number": 1,
+                "title": "With milestone",
+                "body": "",
+                "labels": [],
+                "state": "OPEN",
+                "milestone": {"title": "1.2.3", "number": 5},
+            },
+        ])
         with patch("conductor.runner.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout=gh_output)
             result = _list_open_issues(None)
@@ -562,7 +556,9 @@ class TestResolveTargetMilestone:
         from conductor.runner import _resolve_target_milestone
 
         with patch("conductor.runner.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="1.0.0\n0.2.0\n0.1.0\n")
+            mock_run.return_value = MagicMock(
+                stdout="1.0.0\n0.2.0\n0.1.0\n"
+            )
             result = _resolve_target_milestone("owner/repo")
 
         assert result == "0.1.0"
@@ -601,11 +597,9 @@ class TestEpicAndMilestoneFiltering:
     def _make_runner(self, tmp_path: Path) -> object:
         from conductor.runner import ConductorRunner
 
-        with (
-            patch("conductor.runner.load_config") as mock_cfg,
-            patch("conductor.runner.StateDB") as mock_db_cls,
-            patch("conductor.runner.AgentPool") as mock_pool_cls,
-        ):
+        with patch("conductor.runner.load_config") as mock_cfg, patch(
+            "conductor.runner.StateDB"
+        ) as mock_db_cls, patch("conductor.runner.AgentPool") as mock_pool_cls:
             mock_cfg.return_value = MagicMock(
                 pool=MagicMock(
                     max_sessions=3,
@@ -637,7 +631,9 @@ class TestEpicAndMilestoneFiltering:
                 "milestone": None,
             },
         ]
-        with patch("conductor.runner._list_open_issues", return_value=fake_issues):
+        with patch(
+            "conductor.runner._list_open_issues", return_value=fake_issues
+        ):
             dag = runner._refresh_dag()
 
         assert len(dag.nodes) == 1
@@ -663,14 +659,18 @@ class TestEpicAndMilestoneFiltering:
                 "milestone": None,
             },
         ]
-        with patch("conductor.runner._list_open_issues", return_value=fake_issues):
+        with patch(
+            "conductor.runner._list_open_issues", return_value=fake_issues
+        ):
             dag = runner._refresh_dag()
 
         assert len(dag.nodes) == 1
         assert dag.get_node(2) is not None
         assert dag.get_node(15) is None
 
-    def test_refresh_dag_no_milestone_filter_includes_all(self, tmp_path: Path) -> None:
+    def test_refresh_dag_no_milestone_filter_includes_all(
+        self, tmp_path: Path
+    ) -> None:
         runner = self._make_runner(tmp_path)
         runner._target_milestone = None
         fake_issues = [
@@ -689,7 +689,9 @@ class TestEpicAndMilestoneFiltering:
                 "milestone": None,
             },
         ]
-        with patch("conductor.runner._list_open_issues", return_value=fake_issues):
+        with patch(
+            "conductor.runner._list_open_issues", return_value=fake_issues
+        ):
             dag = runner._refresh_dag()
 
         assert len(dag.nodes) == 2
@@ -762,12 +764,171 @@ class TestEpicAndMilestoneFiltering:
         assert "0/3 busy" in table.caption
 
 
+class TestAsyncDispatch:
+    def _make_runner(self, tmp_path: Path) -> object:
+        from conductor.runner import ConductorRunner
+
+        with patch("conductor.runner.load_config") as mock_cfg, patch(
+            "conductor.runner.StateDB"
+        ) as mock_db_cls, patch("conductor.runner.AgentPool") as mock_pool_cls:
+            mock_cfg.return_value = MagicMock(
+                pool=MagicMock(
+                    max_sessions=3,
+                    idle_ttl_seconds=60,
+                    default_model="sonnet-4.5",
+                )
+            )
+            mock_db_cls.return_value = MagicMock()
+            mock_pool_cls.return_value = MagicMock()
+            runner = ConductorRunner(tmp_path, repo="owner/repo")
+        return runner
+
+    def test_shutdown_event_property(self, tmp_path: Path) -> None:
+        runner = self._make_runner(tmp_path)
+        assert runner._shutdown is False
+        runner._shutdown = True
+        assert runner._shutdown is True
+        assert runner._shutdown_event.is_set()
+        runner._shutdown = False
+        assert runner._shutdown is False
+
+    def test_submit_dispatch_tracks_in_dispatches(self, tmp_path: Path) -> None:
+        from conductor.dag import DAGNode
+
+        runner = self._make_runner(tmp_path)
+        node = DAGNode(number=5, title="Test", phase="design")
+
+        with patch.object(runner, "_dispatch_issue"):
+            runner._submit_dispatch(node, "design")
+
+        assert 5 in runner._dispatches
+        assert runner._dispatches[5] == "agent-5"
+        assert 5 in runner._futures
+
+    def test_submit_dispatch_skips_if_already_dispatched(self, tmp_path: Path) -> None:
+        from conductor.dag import DAGNode
+
+        runner = self._make_runner(tmp_path)
+        runner._dispatches[5] = "agent-5"
+        node = DAGNode(number=5, title="Test", phase="design")
+
+        with patch.object(runner, "_dispatch_issue") as mock_d:
+            runner._submit_dispatch(node, "design")
+
+        mock_d.assert_not_called()
+        assert 5 not in runner._futures
+
+    def test_reap_futures_updates_phase_from_db(self, tmp_path: Path) -> None:
+        from concurrent.futures import Future
+
+        from conductor.dag import DAG
+
+        runner = self._make_runner(tmp_path)
+        dag = DAG()
+        dag.add_node(5, "Test issue", phase="pending")
+
+        future: Future[None] = Future()
+        future.set_result(None)
+        runner._futures[5] = future
+        runner.db.get_issue.return_value = {"phase": "design"}
+
+        runner._reap_futures(dag)
+
+        assert 5 not in runner._futures
+        assert dag.get_node(5).phase == "design"
+
+    def test_cleanup_shuts_down_executor(self, tmp_path: Path) -> None:
+        runner = self._make_runner(tmp_path)
+        runner._cleanup()
+        runner.pool.shutdown.assert_called_once()
+        runner.db.close.assert_called_once()
+
+    def test_handle_shutdown_sets_event(self, tmp_path: Path) -> None:
+        runner = self._make_runner(tmp_path)
+        runner._handle_shutdown(2, None)
+        assert runner._shutdown_event.is_set()
+
+
+class TestLoadIssueContextFromDB:
+    def test_loads_from_db(self, tmp_path: Path) -> None:
+        from conductor.phases import PhaseContext, _load_issue_context
+        from conductor.state_db import StateDB
+
+        db = StateDB(tmp_path / "test.db")
+        db.upsert_issue(
+            42, "Test feature",
+            body="Build the thing",
+            labels='["bug", "phase:design"]',
+            blocked_by="[1, 2]",
+            branch="feature/42",
+        )
+        ctx = PhaseContext(
+            issue_number=42,
+            config=MagicMock(),
+            pool=MagicMock(),
+            db=db,
+            project_root=tmp_path,
+            worktree=tmp_path / "wt",
+        )
+        ic = _load_issue_context(ctx, "plan")
+        assert ic.number == 42
+        assert ic.title == "Test feature"
+        assert ic.body == "Build the thing"
+        assert ic.labels == ["bug", "phase:design"]
+        assert ic.phase == "plan"
+        assert ic.branch == "feature/42"
+        db.close()
+
+    def test_raises_when_not_found(self, tmp_path: Path) -> None:
+        from conductor.phases import PhaseContext, _load_issue_context
+        from conductor.state_db import StateDB
+
+        db = StateDB(tmp_path / "test2.db")
+        ctx = PhaseContext(
+            issue_number=999,
+            config=MagicMock(),
+            pool=MagicMock(),
+            db=db,
+            project_root=tmp_path,
+            worktree=tmp_path / "wt",
+        )
+        with pytest.raises(ValueError, match="not found"):
+            _load_issue_context(ctx, "design")
+        db.close()
+
+
+class TestStateDBBodyLabels:
+    def test_body_and_labels_stored(self, tmp_path: Path) -> None:
+        from conductor.state_db import StateDB
+
+        db = StateDB(tmp_path / "test.db")
+        db.upsert_issue(
+            1, "Test", body="Issue body", labels='["bug"]'
+        )
+        issue = db.get_issue(1)
+        assert issue["body"] == "Issue body"
+        assert issue["labels"] == '["bug"]'
+        db.close()
+
+    def test_body_defaults_to_null(self, tmp_path: Path) -> None:
+        from conductor.state_db import StateDB
+
+        db = StateDB(tmp_path / "test.db")
+        db.upsert_issue(1, "Test")
+        issue = db.get_issue(1)
+        assert issue["body"] is None
+        assert issue["labels"] is None
+        db.close()
+
+
 class TestStateDBMilestone:
     def test_milestone_column_in_new_db(self, tmp_path: Path) -> None:
         from conductor.state_db import StateDB
 
         db = StateDB(tmp_path / "test.db")
-        db.upsert_issue(number=1, title="Test", phase="pending", milestone="0.1.0")
+        db.upsert_issue(
+            number=1, title="Test", phase="pending", milestone="0.1.0"
+        )
         issue = db.get_issue(1)
         assert issue is not None
         assert issue["milestone"] == "0.1.0"

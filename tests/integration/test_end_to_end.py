@@ -22,11 +22,20 @@ from conductor.models import FileOutput, IssueContext
 from conductor.phases import PHASE_ORDER, PhaseContext, run_all_phases, run_phase
 from conductor.state_db import StateDB
 
-from .conftest import make_issue_data
-
 # ---------------------------------------------------------------------------
 # 1. Single-issue happy path
 # ---------------------------------------------------------------------------
+
+
+def _seed_issue(db: object, number: int = 42, title: str = "Test issue") -> None:
+    """Insert issue with body/labels so _load_issue_context works from DB."""
+    db.upsert_issue(
+        number,
+        title,
+        phase="pending",
+        body="Implement feature X",
+        labels=json.dumps([]),
+    )
 
 
 class TestSingleIssueHappyPath:
@@ -34,19 +43,16 @@ class TestSingleIssueHappyPath:
 
     @patch("conductor.phases.add_label")
     @patch("conductor.phases.post_comment")
-    @patch("conductor.phases.read_issue")
     @patch("conductor.phases.dispatch_step")
     def test_full_pipeline(
         self,
         mock_dispatch: MagicMock,
-        mock_read: MagicMock,
         mock_comment: MagicMock,
         mock_label: MagicMock,
         phase_ctx: PhaseContext,
     ) -> None:
-        phase_ctx.db.upsert_issue(42, "Test issue", phase="pending")
+        _seed_issue(phase_ctx.db)
 
-        mock_read.return_value = make_issue_data(number=42, title="Test issue")
         mock_dispatch.return_value = StepResult(success=True, output=MagicMock())
 
         results = run_all_phases(phase_ctx, start_phase="design")
@@ -66,18 +72,15 @@ class TestSingleIssueHappyPath:
 
     @patch("conductor.phases.add_label")
     @patch("conductor.phases.post_comment")
-    @patch("conductor.phases.read_issue")
     @patch("conductor.phases.dispatch_step")
     def test_db_state_updates_per_phase(
         self,
         mock_dispatch: MagicMock,
-        mock_read: MagicMock,
         mock_comment: MagicMock,
         mock_label: MagicMock,
         phase_ctx: PhaseContext,
     ) -> None:
-        phase_ctx.db.upsert_issue(42, "Test issue", phase="pending")
-        mock_read.return_value = make_issue_data(number=42)
+        _seed_issue(phase_ctx.db)
         mock_dispatch.return_value = StepResult(success=True, output=MagicMock())
 
         for phase in PHASE_ORDER:
@@ -90,18 +93,15 @@ class TestSingleIssueHappyPath:
 
     @patch("conductor.phases.add_label")
     @patch("conductor.phases.post_comment")
-    @patch("conductor.phases.read_issue")
     @patch("conductor.phases.dispatch_step")
     def test_sync_queue_gets_entries(
         self,
         mock_dispatch: MagicMock,
-        mock_read: MagicMock,
         mock_comment: MagicMock,
         mock_label: MagicMock,
         phase_ctx: PhaseContext,
     ) -> None:
-        phase_ctx.db.upsert_issue(42, "Test issue")
-        mock_read.return_value = make_issue_data(number=42)
+        _seed_issue(phase_ctx.db)
         mock_dispatch.return_value = StepResult(success=True, output=MagicMock())
 
         run_all_phases(phase_ctx)
@@ -121,18 +121,15 @@ class TestSingleIssueHappyPath:
 
     @patch("conductor.phases.add_label")
     @patch("conductor.phases.post_comment")
-    @patch("conductor.phases.read_issue")
     @patch("conductor.phases.dispatch_step")
     def test_stops_on_failure(
         self,
         mock_dispatch: MagicMock,
-        mock_read: MagicMock,
         mock_comment: MagicMock,
         mock_label: MagicMock,
         phase_ctx: PhaseContext,
     ) -> None:
-        phase_ctx.db.upsert_issue(42, "Test issue")
-        mock_read.return_value = make_issue_data(number=42)
+        _seed_issue(phase_ctx.db)
 
         call_count = 0
 

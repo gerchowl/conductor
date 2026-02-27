@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -121,8 +122,7 @@ class TestBuildPrompt:
         assert str(inp) in prompt
         assert str(out) in prompt
         assert "Read" in prompt
-        assert "Perform the task described" in prompt
-        assert "Write your JSON result to" in prompt
+        assert "JSON" in prompt
 
 
 class TestDispatchStepRejectsPython:
@@ -145,7 +145,9 @@ class TestDispatchStepRejectsPython:
 
 
 class TestDispatchStepHappyPath:
-    def test_success(self, tmp_path: Path, db: StateDB, mock_pool: MagicMock) -> None:
+    def test_success(
+        self, tmp_path: Path, db: StateDB, mock_pool: MagicMock
+    ) -> None:
         config = _make_config()
         output_dir = tmp_path / ".conductor" / "steps" / "42"
         output_dir.mkdir(parents=True)
@@ -251,3 +253,57 @@ class TestDispatchStepValidationRetry:
 
         steps = db.get_steps(42)
         assert steps[0]["status"] == "completed"
+
+
+class TestDispatchShutdownEvent:
+    def test_shutdown_cancels_dispatch(
+        self, tmp_path: Path, db: StateDB, mock_pool: MagicMock
+    ) -> None:
+        config = _make_config()
+        shutdown = threading.Event()
+        shutdown.set()
+
+        result = dispatch_step(
+            issue_number=42,
+            step_id="2.2",
+            input_data=SampleInput(question="test"),
+            output_type=SampleOutput,
+            config=config,
+            pool=mock_pool,
+            db=db,
+            project_root=tmp_path,
+            worktree=tmp_path / "wt",
+            poll_interval=0.01,
+            shutdown_event=shutdown,
+        )
+
+        assert result.success is False
+        assert result.error == "shutdown"
+        steps = db.get_steps(42)
+        assert steps[0]["status"] == "cancelled"
+
+
+class TestDispatchTimeout:
+    def test_timeout_returns_failure(
+        self, tmp_path: Path, db: StateDB, mock_pool: MagicMock
+    ) -> None:
+        config = _make_config()
+
+        result = dispatch_step(
+            issue_number=42,
+            step_id="2.2",
+            input_data=SampleInput(question="test"),
+            output_type=SampleOutput,
+            config=config,
+            pool=mock_pool,
+            db=db,
+            project_root=tmp_path,
+            worktree=tmp_path / "wt",
+            poll_interval=0.01,
+            timeout=0.0,
+        )
+
+        assert result.success is False
+        assert result.error == "timeout"
+        steps = db.get_steps(42)
+        assert steps[0]["status"] == "failed"
