@@ -165,6 +165,7 @@ class TestDrainIdle:
         pool._run.assert_called_once_with(
             ["tmux", "kill-session", "-t", "conductor-agent-0"],
             capture_output=True,
+            timeout=5,
         )
 
 
@@ -182,7 +183,9 @@ class TestShutdown:
         pool._run.reset_mock()
         pool.shutdown()
         kill_calls = [
-            c for c in pool._run.call_args_list if c[0][0][1] == "kill-session"
+            c
+            for c in pool._run.call_args_list
+            if c[0][0][1] == "kill-session"
         ]
         assert len(kill_calls) == 2
 

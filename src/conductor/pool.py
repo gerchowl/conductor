@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_SUBPROCESS_TIMEOUT = 30
 
 
 @dataclass
@@ -31,6 +36,7 @@ class AgentPool:
     def _run(
         self, args: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
+        kwargs.setdefault("timeout", _SUBPROCESS_TIMEOUT)
         return subprocess.run(args, **kwargs)
 
     def _make_name(self) -> str:
@@ -39,10 +45,13 @@ class AgentPool:
         return name
 
     def _session_exists(self, name: str) -> bool:
-        result = self._run(
-            ["tmux", "has-session", "-t", name],
-            capture_output=True,
-        )
+        try:
+            result = self._run(
+                ["tmux", "has-session", "-t", name],
+                capture_output=True,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return False
         return result.returncode == 0
 
     def _create_session(self, name: str, worktree: Path) -> None:
@@ -61,7 +70,14 @@ class AgentPool:
         )
 
     def _kill_session(self, name: str) -> None:
-        self._run(["tmux", "kill-session", "-t", name], capture_output=True)
+        try:
+            self._run(
+                ["tmux", "kill-session", "-t", name],
+                capture_output=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            logger.warning("Failed to kill tmux session %s", name)
 
     def acquire(self, worktree: Path, model: str | None = None) -> AgentSession:
         target_model = model or self._default_model

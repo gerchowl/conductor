@@ -326,9 +326,14 @@ class ConductorRunner:
         return table
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
+        if self._shutdown_event.is_set():
+            import os
+            os._exit(1)
         self._shutdown_event.set()
 
     def _cleanup(self) -> None:
-        self._executor.shutdown(wait=False)
+        for future in self._futures.values():
+            future.cancel()
+        self._executor.shutdown(wait=True, cancel_futures=True)
         self.pool.shutdown()
         self.db.close()
