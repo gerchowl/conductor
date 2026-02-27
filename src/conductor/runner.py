@@ -177,6 +177,8 @@ class ConductorRunner:
             with self._dispatch_lock:
                 if node.number in self._dispatches:
                     continue
+                if len(self._dispatches) >= self.config.pool.max_sessions:
+                    break
             current_phase = (
                 node.phase if node.phase in PHASE_ORDER else "design"
             )
