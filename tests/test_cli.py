@@ -32,13 +32,10 @@ def test_run_help(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_init_calls_init_config(tmp_path: Path) -> None:
-    with (
-        patch(
-            "conductor.config.init_config",
-            return_value=tmp_path / ".conductor" / "conductor.toml",
-        ) as mock_init,
-        patch("conductor.cli.Path") as mock_path_cls,
-    ):
+    with patch(
+        "conductor.config.init_config",
+        return_value=tmp_path / ".conductor" / "conductor.toml",
+    ) as mock_init, patch("conductor.cli.Path") as mock_path_cls:
         mock_path_cls.cwd.return_value = tmp_path
         result = main(["--init"])
 
@@ -48,10 +45,9 @@ def test_init_calls_init_config(tmp_path: Path) -> None:
 
 def test_run_creates_runner_and_calls_run(tmp_path: Path) -> None:
     mock_runner = MagicMock()
-    with (
-        patch("conductor.runner.ConductorRunner", return_value=mock_runner) as mock_cls,
-        patch("conductor.cli.Path") as mock_path_cls,
-    ):
+    with patch(
+        "conductor.runner.ConductorRunner", return_value=mock_runner
+    ) as mock_cls, patch("conductor.cli.Path") as mock_path_cls:
         mock_path_cls.cwd.return_value = tmp_path
         result = main(["run", "--repo", "owner/repo", "--poll-interval", "5"])
 
@@ -75,11 +71,9 @@ class TestConductorRunner:
     def _make_runner(self, tmp_path: Path) -> object:
         from conductor.runner import ConductorRunner
 
-        with (
-            patch("conductor.runner.load_config") as mock_cfg,
-            patch("conductor.runner.StateDB") as mock_db_cls,
-            patch("conductor.runner.AgentPool") as mock_pool_cls,
-        ):
+        with patch("conductor.runner.load_config") as mock_cfg, patch(
+            "conductor.runner.StateDB"
+        ) as mock_db_cls, patch("conductor.runner.AgentPool") as mock_pool_cls:
             mock_cfg.return_value = MagicMock(
                 pool=MagicMock(
                     max_sessions=3,
@@ -95,11 +89,9 @@ class TestConductorRunner:
     def test_init_creates_config_db_pool(self, tmp_path: Path) -> None:
         from conductor.runner import ConductorRunner
 
-        with (
-            patch("conductor.runner.load_config") as mock_cfg,
-            patch("conductor.runner.StateDB") as mock_db_cls,
-            patch("conductor.runner.AgentPool") as mock_pool_cls,
-        ):
+        with patch("conductor.runner.load_config") as mock_cfg, patch(
+            "conductor.runner.StateDB"
+        ) as mock_db_cls, patch("conductor.runner.AgentPool") as mock_pool_cls:
             mock_cfg.return_value = MagicMock(
                 pool=MagicMock(
                     max_sessions=3,
@@ -123,34 +115,22 @@ class TestConductorRunner:
         assert runner._shutdown is False
 
     def test_render_dashboard_returns_table(self, tmp_path: Path) -> None:
-        runner = self._make_runner(tmp_path)
-        runner.db.list_issues.return_value = [
-            {
-                "number": 1,
-                "title": "First issue",
-                "phase": "design",
-                "current_step": "1.2",
-                "blocked_by": "[]",
-            },
-            {
-                "number": 2,
-                "title": "Second issue",
-                "phase": "pending",
-                "current_step": None,
-                "blocked_by": "[1]",
-            },
-        ]
+        from conductor.dag import DAG
 
-        table = runner._render_dashboard()
+        runner = self._make_runner(tmp_path)
+        dag = DAG()
+        dag.add_node(1, "First issue", phase="design")
+        dag.add_node(2, "Second issue", blocked_by=[1], phase="pending")
+
+        table = runner._render_dashboard(dag)
 
         assert isinstance(table, Table)
         assert table.title == "Conductor Dashboard"
-        assert len(table.columns) == 5
+        assert len(table.columns) == 4
         assert table.row_count == 2
 
     def test_render_dashboard_empty(self, tmp_path: Path) -> None:
         runner = self._make_runner(tmp_path)
-        runner.db.list_issues.return_value = []
 
         table = runner._render_dashboard()
 
