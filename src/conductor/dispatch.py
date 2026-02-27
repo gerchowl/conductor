@@ -116,6 +116,7 @@ def dispatch_step[T: BaseModel](
         if on_session_acquired is not None:
             on_session_acquired(issue_number, session.name)
         pool.clear_context(session)
+        time.sleep(2.0)  # Let agent process /clear before sending prompt
 
         prompt = _build_prompt(input_path, output_path)
         pool.send(session, prompt)
