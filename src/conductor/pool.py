@@ -97,6 +97,15 @@ class AgentPool:
 
         name = self._make_name()
         self._create_session(name, worktree)
+        time.sleep(2)
+        try:
+            self._run(
+                ["tmux", "send-keys", "-t", name, "a"],
+                capture_output=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
         session = AgentSession(
             name=name,
             worktree=worktree,
