@@ -1,0 +1,60 @@
+# yamllint disable rule:line-length
+---
+name: CI
+
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: ./.github/actions/setup-env
+        with:
+          sync-dependencies: 'true'
+      - run: uv run ruff check src/ tests/
+      - run: uv run ruff format --check src/ tests/
+
+  test:
+    name: Tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: ./.github/actions/setup-env
+        with:
+          sync-dependencies: 'true'
+      - run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 30
+          if-no-files-found: ignore
+
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    needs: [lint, test]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          echo "Lint: ${{ needs.lint.result }}"
+          echo "Test: ${{ needs.test.result }}"
+          if [ "${{ needs.lint.result }}" = "failure" ] || [ "${{ needs.test.result }}" = "failure" ]; then
+            exit 1
+          fi
+          echo "All checks passed"

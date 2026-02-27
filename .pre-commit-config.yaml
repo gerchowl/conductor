@@ -1,0 +1,26 @@
+---
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: debug-statements
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: aad66557af3b56ba6d4d69cd1b6cba87cef50cbb  # v0.14.3
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/crate-ci/typos
+    rev: 07d900b8fa1097806b8adb6391b0d3e0ac2fdea7  # v1.39.0
+    hooks:
+      - id: typos

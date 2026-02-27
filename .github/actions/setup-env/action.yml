@@ -1,0 +1,27 @@
+name: 'Setup Environment'
+description: 'Set up CI environment with Python and uv'
+
+inputs:
+  sync-dependencies:
+    description: 'Run uv sync to install project dependencies'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+      with:
+        python-version-file: "pyproject.toml"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b  # v7
+      with:
+        enable-cache: true
+        version: "0.10.0"
+
+    - name: Sync Python dependencies
+      if: inputs.sync-dependencies == 'true'
+      shell: bash
+      run: uv sync --frozen --all-extras
